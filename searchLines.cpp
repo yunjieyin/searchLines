@@ -92,6 +92,8 @@ uchar** binarizeImg(uchar** ptrGrayImg, unsigned int rows, unsigned int cols, un
 				p[i][j] = minVal;
 			else
 				p[i][j] = maxVal;
+			if (j == 0 || j == 1 || j == cols || j == cols - 1 || j == cols -2)
+				p[i][j] = 0;
 		}
 	}
 
@@ -369,6 +371,56 @@ int calcThreshold(uchar **ptr, int rows, int cols)
 	return valThresh;
 }
 
+void adaptiveThreshold(Mat &img, double th)
+{
+	Mat im;
+	im = img.clone();
+	int i, j, k;
+	//行列
+	int row = img.rows;
+	int col = img.cols;
+	//8邻域、均值
+	uchar n[9];
+	double m;
+	//遍历图像
+	uchar *p0, *pp, *p1, *p;
+	for (i = 1; i < row - 1; ++i)
+	{
+		//读取图像数据
+		p0 = im.ptr<uchar>(i - 1);
+		pp = im.ptr<uchar>(i);
+		p1 = im.ptr<uchar>(i + 1);
+		//修改原图
+		p = img.ptr<uchar>(i);
+		for (j = 1; j < col - 1; ++j)
+		{
+			m = 0;
+			//3x3 八邻域
+			n[0] = p0[j - 1];
+			n[1] = p0[j];
+			n[2] = p0[j + 1];
+			n[3] = pp[j - 1];
+			n[4] = pp[j];
+			n[5] = pp[j + 1];
+			n[6] = p1[j - 1];
+			n[7] = p1[j];
+			n[8] = p1[j + 1];
+			//计算均值
+			for (k = 0; k < 9; k++)
+			{
+				m += n[k];
+			}
+			m = m / 9 ;
+
+			if (n[4] > m && n[4] > th * 0.8)
+				p[j] = 255;
+			else
+				p[j] = 0;
+		}
+	}
+	im.release();
+}
+
 uchar** makeImgThinner(uchar** ptrImg, unsigned int rows, unsigned int cols, const int maxIterations = -1)
 {
 	/***Extract a binarized image's skeleton***/
@@ -548,14 +600,14 @@ uchar** preproAndThin(uchar** ptrGray, unsigned int rows, unsigned int cols)
 
 	uchar** pCopyImg = ptrGray;
 	uchar** pBlur = mediaBlur3(pCopyImg, imgRows, imgCols);
-	int thresh = calcThreshold(pBlur, imgRows, imgCols);
+	int thresh = calcThreshold(pCopyImg, imgRows, imgCols);
 
-	uchar** pBinarize = binarizeImg(pBlur, imgRows, imgCols, thresh, 255, 0);
+	uchar** pBinarize = binarizeImg(pCopyImg, imgRows, imgCols, thresh, 255, 0);
 	uchar** pDilate = dilateImg(pBinarize, imgRows, imgCols, 2, 3);
 	
-	binaryImgNormalize(pDilate, imgRows, imgCols);
+	binaryImgNormalize(pBinarize, imgRows, imgCols);
 
-	uchar** ptrThinner = makeImgThinner(pDilate, imgRows, imgCols);
+	uchar** ptrThinner = makeImgThinner(pBinarize, imgRows, imgCols);
 	binaryImgScale(ptrThinner, imgRows, imgCols);
 
 	//cv::Mat thinnerMat = arryToMat(ptrThinner, imgRows, imgCols);
@@ -829,14 +881,36 @@ vector<deque<mPoint>> correctLines(vector<deque<mPoint>> lines, unsigned int col
 }
 
 
-bool lineFeature(deque<mPoint> line)
+void yMonotonous(std::vector<int> yIndexVec, bool& bYInc, bool& bYDec)
 {
-	int ascent = 0;
-	int descend = 0;
-	int flatLand = 0;
-	bool bShort = false;
-	bool bMono = true;
-	bool bRes = false;
+	assert(!yIndexVec.empty());
+	bYInc = false;
+	bYDec = false;
+	int incCount = 0;
+	int decCount = 0;
+
+	for (int i = 0; i < yIndexVec.size()-1; ++i)
+	{
+		int j = i + 1;
+		if (yIndexVec[j] - yIndexVec[i] > 0)
+			incCount++;
+		if (yIndexVec[j] - yIndexVec[i] < 0)
+			decCount++;
+	}
+	
+	if (incCount > 10)
+		bYInc = true;
+	if (decCount > 10)
+		bYDec = true;
+}
+
+void xyIndexTrend(deque<mPoint> line, int index, unsigned int pointsNum, bool& bXsame, bool& bYInc, bool& bYDec)
+{
+
+	assert(pointsNum > 1);
+	int count = 0;
+	bYInc = true;
+	bYDec = true;
 
 	std::vector<int> yIndexVec;
 	std::vector<int> xIndexVec;
@@ -846,83 +920,266 @@ bool lineFeature(deque<mPoint> line)
 		xIndexVec.push_back(line[i].x);
 	}
 
-	unsigned int numEle = yIndexVec.size();
-	if (numEle < 20)
+	/* whether continuous n pionts's x index are same*/
+	for (int i = index; i < index + pointsNum - 1; ++i)
 	{
-		bShort = true;
+		int j = i + 1;
+		if (j < line.size() && (xIndexVec[j] - xIndexVec[i] == 0))
+		{
+			count++;
+		}
 	}
 
-	for (int i = 0; i < numEle; ++i)
+
+	bXsame = (count == (pointsNum - 1));
+
+	/*whether y index is increase or decrease*/
+	if (index + pointsNum - 1 < line.size())
 	{
-		if (i + 2 < numEle)
+		int yDiff = yIndexVec[index + pointsNum - 1] - yIndexVec[index];
+
+		if (abs(yDiff) <= 2)
 		{
-			/*ascent、descend and flatten judgement*/
-			if (yIndexVec[i + 1] > yIndexVec[i] && yIndexVec[i + 2] > yIndexVec[i + 1])
+			bYInc = false;
+			bYDec = false;
+		}
+		else
+		{
+			int Inc = (yDiff >= 0) ? 1 : -1;
+			for (int i = index; i < index + pointsNum; ++i)
 			{
-				ascent++;//continue five points's y index increase
-			}
-			else if (yIndexVec[i + 1] < yIndexVec[i] && yIndexVec[i + 2] < yIndexVec[i + 1])
-			{
-				descend++;//continue five point's y index decrease
-			}
-			else if ((yIndexVec[i + 1] - yIndexVec[i]) * (yIndexVec[i + 2] - yIndexVec[i + 1] ) <= 0)
-			{
-				flatLand++;
-			}
-
-
-			/* monotonous judgement */
-			int diff1 = xIndexVec[i + 1] - xIndexVec[i];
-			int diff2 = xIndexVec[i + 2] - xIndexVec[i + 1];
-			if (diff1 * diff2 < 0)
-			{
-				//revesre or loop
-				bMono = false;
-				break;
-			}
-			else if (diff1 * diff2 == 0)
-			{
-				//go head to the y direction
-				if ((i+3) < numEle && diff1 == 0 && diff2 == 0 && (xIndexVec[i + 3] - xIndexVec[i + 2]) == 0)//1 "I" shape
+				int j = i + 1;
+				if (j < line.size() && Inc == 1)
 				{
-					bMono = false;
-					break;
-				}
-				else if (diff1 > 0 && diff2 == 0)//2 "L"shape
-				{
-					int j = i + 2;
-					if (j + 1 < numEle && xIndexVec[j + 1] - xIndexVec[j] == 0)
+					if (yIndexVec[j] - yIndexVec[i] < 0)
 					{
-						bMono = false;
+						bYInc = false;
 						break;
 					}
 				}
-				else//3 "L" shape
+				else if (j < line.size() && Inc == -1)
 				{
-					int j = i + 2;
-					if (j +2 < numEle)
+					if (yIndexVec[j] - yIndexVec[i] > 0)
 					{
-						int delta1 = xIndexVec[j + 1] - xIndexVec[j];
-						int delta2 = xIndexVec[j + 2] - xIndexVec[j + 1];
-						if (delta1 == 0 && delta2 == 0)
-						{
-							bMono = false;
-							break;
-						}
+						bYDec = false;
+						break;
 					}
 				}
+
 			}
 		}
-
 	}
-
-	bRes = bMono && (ascent > 3) && (descend > 3) && (flatLand > 200);
-	return bRes;
+	
+	
 }
 
-std::vector<mPoint> seekSuspectDefect(std::vector < deque<mPoint> > lines)
+
+double calcSlop(mPoint point1, mPoint point2)
 {
-	/*int lineNums = lines.size();
+	double deltaX = point2.x - point1.x;
+	double deltaY = point2.y - point1.y;
+
+	double slop;
+	if (deltaX == 0)
+		slop = 1000000;
+	else
+		slop = deltaY / deltaX;
+
+	return slop;
+}
+
+bool lineMonotonous(deque<mPoint> line, std::vector<double>& slopsVec)
+{
+	/*judge a line's trend: make sure the line keep increase and 
+	* decrease in the either endpoint position and keep flat in 
+	* the middle position
+	*/
+
+	if (line.size() < 20)
+		return false;
+
+	const unsigned segNum = 8;
+	unsigned nLen = line.size();
+	unsigned nSegLen = nLen / segNum;
+	int posCnt = 0;
+	int negCnt = 0;
+	int fltCnt = 0;
+	bool bInc = false;
+	bool bDec = false;
+	bool bFlt = false;
+	bool bEndHor = false;
+
+	//the sample points index
+	mPoint arr[segNum + 1] = { 0 };
+	for (int i = 0; i < segNum + 1; ++i)
+	{
+		int index = i * nSegLen;
+		while (index >= nLen)
+		{
+			--index;
+		}		
+		arr[i] = line[index];
+	}
+	
+	//the slop between sample points
+	//std::vector<double> slopsVec;
+	for (int i = 0; i < segNum; ++i)
+	{
+		if (i < 4)
+		{
+			slopsVec.push_back(calcSlop(arr[0], arr[i + 1]));
+		}
+		else
+		{
+			slopsVec.push_back(calcSlop(arr[i], arr[segNum]));
+		}
+	}
+	slopsVec.push_back(calcSlop(arr[3], arr[4]));
+	slopsVec.push_back(calcSlop(arr[4], arr[5]));
+	slopsVec.push_back(calcSlop(arr[3], arr[5]));
+	slopsVec.push_back(calcSlop(arr[0], arr[8]));
+	
+	//nomalize slop vector
+	std::vector<double> tmp;
+	tmp = slopsVec;
+	for (int i = 0; i < tmp.size(); ++i)
+	{
+		tmp[i] = abs(tmp[i]);
+	}
+
+	double maxVal = *(std::max_element(tmp.begin(), tmp.end()));
+	for (int i = 0; i < slopsVec.size(); ++i)
+		slopsVec[i] /= maxVal;
+
+	//make a decision according to slop's value
+	for (int i = 0; i < slopsVec.size(); ++i)
+	{
+
+		if (abs(slopsVec[i]) > 0.1 && slopsVec[i] > 0)
+			posCnt++;
+		else if (abs(slopsVec[i]) > 0.1 && slopsVec[i] < 0)
+			negCnt++;
+		else
+			fltCnt++;
+	}
+
+	bInc = posCnt >= 3 ? true : false;
+	bDec = negCnt >= 3 ? true : false;
+	bFlt = fltCnt >= 2 ? true : false;
+
+	if (abs(slopsVec[slopsVec.size() - 1]) < 0.1)
+		bEndHor = true;
+
+	bool bRes = bInc && bDec && bFlt && bEndHor;
+	if (!bRes)
+		slopsVec.clear();
+
+	return (bRes);
+}
+
+
+bool isDefectLine(deque<mPoint> line, std::vector<double>& lineSlop)
+{
+	//int ascent = 0;
+	//int descend = 0;
+	//int flatLand = 0;
+	//bool bShort = false;
+	//bool bRes = false;
+
+	//std::vector<int> yIndexVec;
+	//std::vector<int> xIndexVec;
+	//for (int i = 0; i < line.size(); ++i)
+	//{
+	//	yIndexVec.push_back(line[i].y);
+	//	xIndexVec.push_back(line[i].x);
+	//}
+
+	//unsigned int numEle = yIndexVec.size();
+	//if (numEle < 20)
+	//{
+	//	bShort = true;
+	//}
+
+
+	//for (int i = 0; i < numEle; ++i)
+	//{
+	//	if (i + 2 < numEle)
+	//	{
+	//		/*ascent、descend and flatten judgement*/
+	//		if (yIndexVec[i + 1] > yIndexVec[i] && yIndexVec[i + 2] > yIndexVec[i + 1])
+	//		{
+	//			ascent++;//continue n points's y index increase
+	//		}
+	//		else if (yIndexVec[i + 1] < yIndexVec[i] && yIndexVec[i + 2] < yIndexVec[i + 1])
+	//		{
+	//			descend++;//continue n point's y index decrease
+	//		}
+	//		else if ((yIndexVec[i + 1] - yIndexVec[i]) * (yIndexVec[i + 2] - yIndexVec[i + 1]) <= 0)
+	//		{
+	//			flatLand++;
+	//		}
+
+
+	//		/* monotonous judgement */
+	//		int diff1 = xIndexVec[i + 1] - xIndexVec[i];
+	//		int diff2 = xIndexVec[i + 2] - xIndexVec[i + 1];
+	//		
+
+	//		if (diff1 * diff2 < 0)
+	//		{
+	//			//revesre or loop
+	//			bMono = false;
+	//			cout << "reverse loop" << "i=" << i << endl;
+	//			break;
+	//		}
+	//		else if (diff1 * diff2 == 0)
+	//		{
+	//			//go head to the y direction:continuous five points's x index are same
+	//			if ((i + 3) < numEle && diff1 == 0 && diff2 == 0 && (xIndexVec[i + 3] - xIndexVec[i + 2]) == 0)//1 "I" shape
+	//			{
+	//				bMono = false;
+	//				cout << "1 " << "i=" << i << endl;
+	//				break;
+	//			}
+	//			else if (diff1 != 0 && diff2 == 0)//2 "L"shape   
+	//			{
+	//				int j = i + 2;
+	//				if (j + 1 < numEle && xIndexVec[j + 1] - xIndexVec[j] == 0)
+	//				{
+	//					bMono = false;
+	//					cout << "2," << "i=" << i << endl;
+	//					break;
+	//				}
+	//			}
+	//			else if(diff1 == 0 && diff2 != 0)//3 "L" shape
+	//			{
+	//				int j = i + 2;
+	//				if (j +2 < numEle)
+	//				{
+	//					int delta1 = xIndexVec[j + 1] - xIndexVec[j];
+	//					int delta2 = xIndexVec[j + 2] - xIndexVec[j + 1];
+	//					if (delta1 == 0 && delta2 == 0)
+	//					{
+	//						bMono = false;
+	//						cout << "3," << "i=" << i << endl;
+	//						break;
+	//					}
+	//				}
+	//			}
+	//		}
+	//	}
+
+	//}
+
+
+	bool bMono = !lineMonotonous(line, lineSlop);
+
+	return (bMono);
+}
+
+std::vector<mPoint> seekSuspectDefectPoints(std::vector<deque<mPoint> > lines)
+{
+	int lineNums = lines.size();
 	std::vector<int> lineLens;
 
 	for (int i = 0; i < lineNums; ++i)
@@ -969,23 +1226,24 @@ std::vector<mPoint> seekSuspectDefect(std::vector < deque<mPoint> > lines)
 
 		if (lines[i].size() < 0.75 * maxLen && (point2.x > p1.x && point2.x < p2.x))
 			suspectPoints.push_back(point2);
-	}*/
-
-
-	std::vector<mPoint> suspectPoints;
-	lineFeature(lines[5]);
+	}
 
 	return suspectPoints;
 	
 }
 
-std::vector<int> suspectLines(std::vector < deque<mPoint> > lines)
+std::vector<int> suspectLines(std::vector<deque<mPoint>> lines)
 {
 	std::vector<int> suspectIndexs;
+	std::vector<vector<double> > linesSlop;//regular line's slops vector(non-empty value)
+	
 	for (int i = 0; i < lines.size(); ++i)
 	{
-		if (!lineFeature(lines[i]))
+		std::vector<double> lineSlop;
+		if (isDefectLine(lines[i], lineSlop))
 			suspectIndexs.push_back(i);
+
+		linesSlop.push_back(lineSlop);
 	}
 
 	return suspectIndexs;
@@ -1072,9 +1330,11 @@ bool detectCrossLines(vector<deque<mPoint>> lines, std::vector<pair<int, int>>& 
 
 int main()
 {
-	//0720   ***
-	cv::Mat img = cv::imread("E:\\pictures\\coil\\coil.bmp", 0);
-	cv::Mat imgcolor = cv::imread("E:\\pictures\\coil\\coil.bmp");
+	/*cv::Mat img = cv::imread("E:\\pictures\\coil\\coil.bmp", 0);
+	cv::Mat imgcolor = cv::imread("E:\\pictures\\coil\\coil.bmp");*/
+
+	cv::Mat img = cv::imread("E:\\pictures\\coil\\roi\\26-6.bmp", 0);
+	cv::Mat imgcolor = cv::imread("E:\\pictures\\coil\\roi\\26-6.bmp");// draw result on imgcolor
 
 	int row = img.rows;
 	int col = img.cols;
@@ -1082,13 +1342,14 @@ int main()
 	/************************************************************/
 	uchar **ptr =  MatToArr(img);
 	uchar **ptrcopy = copyImg(ptr, row, col);
-	uchar** pThin = preproAndThin(ptrcopy, row, col);
+	uchar **pThin = preproAndThin(ptrcopy, row, col);
+	cv::Mat thinMat = arryToMat(pThin, row, col);
 
 	vector<deque<mPoint>> lines;
 	findLines(pThin, row, col, lines);
 	vector<deque<mPoint>> newLines = correctLines(lines, col);
 
-	std::vector<mPoint> suspPoints = seekSuspectDefect(lines);
+	std::vector<mPoint> suspPoints = seekSuspectDefectPoints(lines);
 	std::vector<int> defectLinesIndex = suspectLines(lines);
 
 
@@ -1100,7 +1361,7 @@ int main()
 
 
 //test code begin
-	/// code of test suspect lines
+	 //code of test suspect lines
 	std::vector<std::deque<mPoint>> indexedLines;
 	for (int i = 0; i < defectLinesIndex.size(); ++i)
 	{
@@ -1115,10 +1376,10 @@ int main()
 		}
 	}
 
-	///
+	
 
-
-	///
+	/****************************************************************************/
+	
 	//std::vector<vector<cv::Point>> linesVec;
 	//for (int i = 0; i < lines.size(); ++i)
 	//{
@@ -1150,21 +1411,23 @@ int main()
 	//}
 
 
+	//draw suspect points
+	std::vector<cv::Point> endPoints;
+	for (int i = 0; i < suspPoints.size(); ++i)
+	{
+		cv::Point p;
+		p.x = suspPoints[i].x;
+		p.y = suspPoints[i].y;
+		endPoints.push_back(p);
+	}
 
-	//std::vector<cv::Point> endPoints;
-	//for (int i = 0; i < suspPoints.size(); ++i)
-	//{
-	//	cv::Point p;
-	//	p.x = suspPoints[i].x;
-	//	p.y = suspPoints[i].y;
-	//	endPoints.push_back(p);
-	//}
-
-	//for (int i = 0; i < endPoints.size(); ++i)
-	//{
-	//	cv::circle(imgcolor, endPoints[i], 2, cv::Scalar(0, 0, 255), 2);
-	//}
-	///
+	for (int i = 0; i < endPoints.size(); ++i)
+	{
+		cv::circle(imgcolor, endPoints[i], 1, cv::Scalar(0, 255, 0), 2);
+	}
+	/*******************************************************************************/
+	
+	cv::imshow("thin", thinMat*255);
 
 	imshow("draw_img", imgcolor);
 	cv::imwrite("E:\\pictures\\coil\\fitcoillines.bmp", imgcolor);
